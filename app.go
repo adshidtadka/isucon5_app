@@ -11,6 +11,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"net"
+	"os/signal"
+	"syscall"
 	"path"
 	"runtime"
 	"strconv"
@@ -728,6 +731,12 @@ func loggingMiddleware(next http.Handler) http.Handler {
     })
 }
 
+func finalize(ln net.Listener) {
+	if err := ln.Close(); err != nil {
+		log.Fatalf("Failed to close listener: %v", err)
+	}
+}
+
 func main() {
 	//host := os.Getenv("ISUCON5_DB_HOST")
 	//if host == "" {
@@ -791,9 +800,26 @@ func main() {
 	r.HandleFunc("/", myHandler(GetIndex))
 
 	r.Use(loggingMiddleware)
+
+
+	// use unix domain socket
+	ln, err := net.Listen("unix", "/var/run/isuxi/go.sock")
+	if err != nil {
+		log.Fatalf("Failed to listen unix socket: %v", err)
+	}
+	defer finalize(ln)
+
+	c := make(chan os.Signal, 2)
+	go func(ln net.Listener, c chan os.Signal) {
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		<-c
+		finalize(ln)
+		os.Exit(1)
+	}(ln, c)
+
 	log.Println("Started server")
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("../static")))
-	log.Fatal(http.ListenAndServe(":8080", r))
+	log.Fatal(http.Serve(ln, r))
 }
 
 func checkErr(err error) {

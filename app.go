@@ -9,15 +9,15 @@ import (
 	"github.com/gorilla/sessions"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"os"
-	"net"
 	"os/signal"
-	"syscall"
 	"path"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -723,12 +723,12 @@ func GetInitialize(w http.ResponseWriter, r *http.Request) {
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // Do stuff here
-        log.Println(r.RequestURI)
-        // Call the next handler, which can be another middleware in the chain, or the final handler.
-        next.ServeHTTP(w, r)
-    })
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Do stuff here
+		log.Println(r.RequestURI)
+		// Call the next handler, which can be another middleware in the chain, or the final handler.
+		next.ServeHTTP(w, r)
+	})
 }
 
 func finalize(ln net.Listener) {
@@ -799,8 +799,7 @@ func main() {
 	r.HandleFunc("/initialize", myHandler(GetInitialize))
 	r.HandleFunc("/", myHandler(GetIndex))
 
-	r.Use(loggingMiddleware)
-
+	r.Use(loggingMiddleware) //リクエストごとに処理をさせる
 
 	// use unix domain socket
 	ln, err := net.Listen("unix", "/var/run/isuxi/go.sock")

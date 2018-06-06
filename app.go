@@ -738,18 +738,18 @@ func finalize(ln net.Listener) {
 }
 
 func main() {
-	//host := os.Getenv("ISUCON5_DB_HOST")
-	//if host == "" {
-	//	host = "localhost"
-	//}
-	//portstr := os.Getenv("ISUCON5_DB_PORT")
-	//if portstr == "" {
-	//	portstr = "3306"
-	//}
-	//port, err := strconv.Atoi(portstr)
-	//if err != nil {
-	//	log.Fatalf("Failed to read DB port number from an environment variable ISUCON5_DB_PORT.\nError: %s", err.Error())
-	//}
+	// host := os.Getenv("ISUCON5_DB_HOST")
+	// if host == "" {
+	// 	host = "localhost"
+	// }
+	// portstr := os.Getenv("ISUCON5_DB_PORT")
+	// if portstr == "" {
+	// 	portstr = "3306"
+	// }
+	// port, err := strconv.Atoi(portstr)
+	// if err != nil {
+	// 	log.Fatalf("Failed to read DB port number from an environment variable ISUCON5_DB_PORT.\nError: %s", err.Error())
+	// }
 	user := os.Getenv("ISUCON5_DB_USER")
 	if user == "" {
 		user = "root"
@@ -798,8 +798,9 @@ func main() {
 
 	r.HandleFunc("/initialize", myHandler(GetInitialize))
 	r.HandleFunc("/", myHandler(GetIndex))
+	r.PathPrefix("/").Handler(http.FileServer(http.Dir("../static")))
 
-	r.Use(loggingMiddleware) //リクエストごとに処理をさせる
+	r.Use(loggingMiddleware)
 
 	// use unix domain socket
 	ln, err := net.Listen("unix", "/var/run/isuxi/go.sock")
@@ -817,7 +818,6 @@ func main() {
 	}(ln, c)
 
 	log.Println("Started server")
-	r.PathPrefix("/").Handler(http.FileServer(http.Dir("../static")))
 	log.Fatal(http.Serve(ln, r))
 }
 

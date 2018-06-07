@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syncall"
+	"syscall"
 	"time"
 )
 

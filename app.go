@@ -117,7 +117,6 @@ func loadRelations() (relations, error) {
 }
 
 func addEdge(a, b int, createdAt time.Time) bool {
-	// create relation
 	if rels[a] == nil {
 		rels[a] = map[int]time.Time{}
 	}
@@ -241,12 +240,6 @@ func getUserFromAccount(w http.ResponseWriter, name string) *User {
 
 func isFriend(w http.ResponseWriter, r *http.Request, anotherID int) bool {
 	session := getSession(w, r)
-	// id := session.Values["user_id"]
-	// row := db.QueryRow(`SELECT COUNT(1) AS cnt FROM relations WHERE (one = ? AND another = ?) OR (one = ? AND another = ?)`, id, anotherID, anotherID, id)
-	// cnt := new(int)
-	// err := row.Scan(cnt)
-	// checkErr(err)
-	// return *cnt > 0
 	id, ok := session.Values["user_id"].(int)
 	if !ok {
 		log.Println("Couldn't convert session user_id to int")
@@ -266,6 +259,16 @@ func isFriendAccount(w http.ResponseWriter, r *http.Request, name string) bool {
 		return false
 	}
 	return isFriend(w, r, user.ID)
+}
+
+func getFriendIds(userID int) []interface{} {
+	friendIds := make([]interface{}, 0)
+	for i, t := range rels[userID] {
+		if !t.IsZero() {
+			friendIds = append(friendIds, i)
+		}
+	}
+	return friendIds
 }
 
 func permitted(w http.ResponseWriter, r *http.Request, anotherID int) bool {
@@ -352,10 +355,10 @@ func render(w http.ResponseWriter, r *http.Request, status int, file string, dat
 		"getEntry": func(id int) Entry {
 			row := db.QueryRow(`SELECT * FROM entries WHERE id=?`, id)
 			var entryID, userID, private int
-			var body string
+			var body, title string
 			var createdAt time.Time
-			checkErr(row.Scan(&entryID, &userID, &private, &body, &createdAt))
-			return Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+			checkErr(row.Scan(&entryID, &userID, &private, &body, &createdAt, &title))
+			return Entry{id, userID, private == 1, title, body, createdAt}
 		},
 		"numComments": func(id int) int {
 			row := db.QueryRow(`SELECT COUNT(*) AS c FROM comments WHERE entry_id = ?`, id)
@@ -402,17 +405,17 @@ func GetIndex(w http.ResponseWriter, r *http.Request) {
 		checkErr(err)
 	}
 
-	rows, err := db.Query(`SELECT * FROM entries WHERE user_id = ? ORDER BY created_at LIMIT 5`, user.ID)
+	rows, err := db.Query(`SELECT id, user_id, private, title, created_at FROM entries WHERE user_id = ? ORDER BY created_at LIMIT 5`, user.ID)
 	if err != sql.ErrNoRows {
 		checkErr(err)
 	}
 	entries := make([]Entry, 0, 5)
 	for rows.Next() {
 		var id, userID, private int
-		var body string
+		var title string
 		var createdAt time.Time
-		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-		entries = append(entries, Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt})
+		checkErr(rows.Scan(&id, &userID, &private, &title, &createdAt))
+		entries = append(entries, Entry{id, userID, private == 1, title, "", createdAt})
 	}
 	rows.Close()
 
@@ -433,79 +436,53 @@ LIMIT 10`, user.ID)
 	}
 	rows.Close()
 
-	rows, err = db.Query(`SELECT * FROM entries ORDER BY created_at DESC LIMIT 1000`)
-	if err != sql.ErrNoRows {
-		checkErr(err)
-	}
+	friendIds := getFriendIds(user.ID)
 	entriesOfFriends := make([]Entry, 0, 10)
-	for rows.Next() {
-		var id, userID, private int
-		var body string
-		var createdAt time.Time
-		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-		if !isFriend(w, r, userID) {
-			continue
+	if len(friendIds) > 0 {
+		sqlStr := "SELECT id, user_id, private, title, created_at FROM entries\n" +
+			"WHERE user_id IN (?" + strings.Repeat(",?", len(friendIds)-1) + ")\n" +
+			"ORDER BY id DESC LIMIT 10"
+		rows, err = db.Query(sqlStr, friendIds...)
+		if err != sql.ErrNoRows {
+			checkErr(err)
 		}
-		entriesOfFriends = append(entriesOfFriends, Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt})
-		if len(entriesOfFriends) >= 10 {
-			break
+		for rows.Next() {
+			var id, userID, private int
+			var title string
+			var createdAt time.Time
+			checkErr(rows.Scan(&id, &userID, &private, &title, &createdAt))
+			entriesOfFriends = append(entriesOfFriends, Entry{id, userID, private == 1, title, "", createdAt})
 		}
+		rows.Close()
 	}
-	rows.Close()
 
-	rows, err = db.Query(`SELECT * FROM comments ORDER BY created_at DESC LIMIT 1000`)
-	if err != sql.ErrNoRows {
-		checkErr(err)
-	}
 	commentsOfFriends := make([]Comment, 0, 10)
-	for rows.Next() {
-		c := Comment{}
-		checkErr(rows.Scan(&c.ID, &c.EntryID, &c.UserID, &c.Comment, &c.CreatedAt))
-		if !isFriend(w, r, c.UserID) {
-			continue
+	if len(friendIds) > 0 {
+		sqlStr :=
+			"SELECT c.id, c.entry_id, c.user_id, c.comment, c.created_at FROM comments c\n" +
+				"JOIN entries e ON c.entry_id = e.id\n" +
+				"WHERE c.user_id IN (?" + strings.Repeat(",?", len(friendIds)-1) + ")\n" +
+				"AND (\n" +
+				"  e.private = 0\n" +
+				"  OR\n" +
+				"  e.private = 1 AND (e.user_id = ? OR e.user_id IN (?" + strings.Repeat(",?", len(friendIds)-1) + "))\n" +
+				")\n" +
+				"ORDER BY c.id DESC LIMIT 10"
+		args := friendIds
+		args = append(args, user.ID)
+		args = append(args, friendIds...)
+		rows, err = db.Query(sqlStr, args...)
+		if err != sql.ErrNoRows {
+			checkErr(err)
 		}
-		row := db.QueryRow(`SELECT * FROM entries WHERE id = ?`, c.EntryID)
-		var id, userID, private int
-		var body string
-		var createdAt time.Time
-		checkErr(row.Scan(&id, &userID, &private, &body, &createdAt))
-		entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
-		if entry.Private {
-			if !permitted(w, r, entry.UserID) {
-				continue
-			}
+		for rows.Next() {
+			c := Comment{}
+			checkErr(rows.Scan(&c.ID, &c.EntryID, &c.UserID, &c.Comment, &c.CreatedAt))
+			commentsOfFriends = append(commentsOfFriends, c)
 		}
-		commentsOfFriends = append(commentsOfFriends, c)
-		if len(commentsOfFriends) >= 10 {
-			break
-		}
+		rows.Close()
 	}
-	rows.Close()
 
-	// rows, err = db.Query(`SELECT * FROM relations WHERE one = ? OR another = ? ORDER BY created_at DESC`, user.ID, user.ID)
-	// if err != sql.ErrNoRows {
-	// 	checkErr(err)
-	// }
-	// friendsMap := make(map[int]time.Time)
-	// for rows.Next() {
-	// 	var id, one, another int
-	// 	var createdAt time.Time
-	// 	checkErr(rows.Scan(&id, &one, &another, &createdAt))
-	// 	var friendID int
-	// 	if one == user.ID {
-	// 		friendID = another
-	// 	} else {
-	// 		friendID = one
-	// 	}
-	// 	if _, ok := friendsMap[friendID]; !ok {
-	// 		friendsMap[friendID] = createdAt
-	// 	}
-	// }
-	// friends := make([]Friend, 0, len(friendsMap))
-	// for key, val := range friendsMap {
-	// 	friends = append(friends, Friend{key, val})
-	// }
-	// rows.Close()
 	friends := getFriendsFromRelations(user.ID)
 
 	rows, err = db.Query(`SELECT user_id, owner_id, date, created_at AS updated
@@ -564,10 +541,10 @@ func GetProfile(w http.ResponseWriter, r *http.Request) {
 	entries := make([]Entry, 0, 5)
 	for rows.Next() {
 		var id, userID, private int
-		var body string
+		var body, title string
 		var createdAt time.Time
-		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-		entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt, &title))
+		entry := Entry{id, userID, private == 1, title, body, createdAt}
 		entries = append(entries, entry)
 	}
 	rows.Close()
@@ -627,10 +604,10 @@ func ListEntries(w http.ResponseWriter, r *http.Request) {
 	entries := make([]Entry, 0, 20)
 	for rows.Next() {
 		var id, userID, private int
-		var body string
+		var body, title string
 		var createdAt time.Time
-		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-		entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt, &title))
+		entry := Entry{id, userID, private == 1, title, body, createdAt}
 		entries = append(entries, entry)
 	}
 	rows.Close()
@@ -651,14 +628,14 @@ func GetEntry(w http.ResponseWriter, r *http.Request) {
 	entryID := mux.Vars(r)["entry_id"]
 	row := db.QueryRow(`SELECT * FROM entries WHERE id = ?`, entryID)
 	var id, userID, private int
-	var body string
+	var body, title string
 	var createdAt time.Time
-	err := row.Scan(&id, &userID, &private, &body, &createdAt)
+	err := row.Scan(&id, &userID, &private, &body, &createdAt, &title)
 	if err == sql.ErrNoRows {
 		checkErr(ErrContentNotFound)
 	}
 	checkErr(err)
-	entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+	entry := Entry{id, userID, private == 1, title, body, createdAt}
 	owner := getUser(w, entry.UserID)
 	if entry.Private {
 		if !permitted(w, r, owner.ID) {
@@ -703,7 +680,7 @@ func PostEntry(w http.ResponseWriter, r *http.Request) {
 	} else {
 		private = 1
 	}
-	_, err := db.Exec(`INSERT INTO entries (user_id, private, body) VALUES (?,?,?)`, user.ID, private, title+"\n"+content)
+	_, err := db.Exec(`INSERT INTO entries (user_id, private, title, body) VALUES (?,?,?,?)`, user.ID, private, title, content)
 	checkErr(err)
 	http.Redirect(w, r, "/diary/entries/"+user.AccountName, http.StatusSeeOther)
 }
@@ -716,15 +693,15 @@ func PostComment(w http.ResponseWriter, r *http.Request) {
 	entryID := mux.Vars(r)["entry_id"]
 	row := db.QueryRow(`SELECT * FROM entries WHERE id = ?`, entryID)
 	var id, userID, private int
-	var body string
+	var body, title string
 	var createdAt time.Time
-	err := row.Scan(&id, &userID, &private, &body, &createdAt)
+	err := row.Scan(&id, &userID, &private, &body, &createdAt, &title)
 	if err == sql.ErrNoRows {
 		checkErr(ErrContentNotFound)
 	}
 	checkErr(err)
 
-	entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+	entry := Entry{id, userID, private == 1, title, body, createdAt}
 	owner := getUser(w, entry.UserID)
 	if entry.Private {
 		if !permitted(w, r, owner.ID) {
@@ -767,30 +744,6 @@ func GetFriends(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := getCurrentUser(w, r)
-	// rows, err := db.Query(`SELECT * FROM relations WHERE one = ? OR another = ? ORDER BY created_at DESC`, user.ID, user.ID)
-	// if err != sql.ErrNoRows {
-	// 	checkErr(err)
-	// }
-	// friendsMap := make(map[int]time.Time)
-	// for rows.Next() {
-	// 	var id, one, another int
-	// 	var createdAt time.Time
-	// 	checkErr(rows.Scan(&id, &one, &another, &createdAt))
-	// 	var friendID int
-	// 	if one == user.ID {
-	// 		friendID = another
-	// 	} else {
-	// 		friendID = one
-	// 	}
-	// 	if _, ok := friendsMap[friendID]; !ok {
-	// 		friendsMap[friendID] = createdAt
-	// 	}
-	// }
-	// rows.Close()
-	// friends := make([]Friend, 0, len(friendsMap))
-	// for key, val := range friendsMap {
-	// 	friends = append(friends, Friend{key, val})
-	// }
 	friends := getFriendsFromRelations(user.ID)
 	render(w, r, http.StatusOK, "friends.html", struct{ Friends []Friend }{friends})
 }
@@ -802,10 +755,6 @@ func PostFriends(w http.ResponseWriter, r *http.Request) {
 
 	user := getCurrentUser(w, r)
 	anotherAccount := mux.Vars(r)["account_name"]
-	// if !isFriendAccount(w, r, anotherAccount) {
-	// 	another := getUserFromAccount(w, anotherAccount)
-	// 	_, err := db.Exec(`INSERT INTO relations (one, another) VALUES (?,?), (?,?)`, user.ID, another.ID, another.ID, user.ID)
-	// 	checkErr(err)
 	another := getUserFromAccount(w, anotherAccount)
 	if createRelationIfNotExists(user.ID, another.ID) {
 		http.Redirect(w, r, "/friends", http.StatusSeeOther)
